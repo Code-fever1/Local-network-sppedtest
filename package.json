@@ -1,0 +1,14 @@
+{
+  "name": "local-network-speedtest",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Continuous local network upload/download speed test server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "ws": "^8.18.1"
+  }
+}
