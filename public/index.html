@@ -277,7 +277,7 @@
               <div class="gaugeValue" id="gaugeValue">0.00</div>
               <div class="gaugeUnit">Mbps</div>
               <div class="gaugeMode" id="gaugeMode">Idle</div>
-              <div class="gaugeScale">Gauge Scale: 0 to 10000 Mbps</div>
+              <!-- <div class="gaugeScale">Gauge Scale: 0 to 1000 Mbps</div> -->
             </div>
           </div>
         </div>
@@ -293,6 +293,21 @@
           <article class="metric">
             <div class="metricLabel">Upload Speed (smoothed)</div>
             <div class="metricValue" id="uploadSpeed">0.00 Mbps</div>
+          </article>
+
+          <article class="metric">
+            <div class="metricLabel">Network Latency</div>
+            <div class="metricValue" id="latency">-- ms</div>
+          </article>
+
+          <article class="metric">
+            <div class="metricLabel">Network Interface</div>
+            <div class="metricValue" id="networkInterface">Loading...</div>
+          </article>
+
+          <article class="metric">
+            <div class="metricLabel">Active Connections</div>
+            <div class="metricValue" id="activeConnections">0</div>
           </article>
         </div>
 
@@ -320,6 +335,9 @@
     const statusEl = document.getElementById('status');
     const downloadEl = document.getElementById('downloadSpeed');
     const uploadEl = document.getElementById('uploadSpeed');
+    const latencyEl = document.getElementById('latency');
+    const networkInterfaceEl = document.getElementById('networkInterface');
+    const activeConnectionsEl = document.getElementById('activeConnections');
     const gaugeProgressEl = document.getElementById('gaugeProgress');
     const gaugeValueEl = document.getElementById('gaugeValue');
     const gaugeModeEl = document.getElementById('gaugeMode');
@@ -328,26 +346,36 @@
     const stopButton = document.getElementById('stop');
 
     const uploadChunk = new Uint8Array(256 * 1024).fill(97);
-    const MAX_BUFFERED_BYTES_HIGH = 64 * 1024 * 1024;
-    const MAX_PACKETS_PER_PUMP = 512;
+    const UPLOAD_BUFFER_LOW_BYTES = 2 * 1024 * 1024;
+    const UPLOAD_BUFFER_HIGH_BYTES = 8 * 1024 * 1024;
+    const MAX_PACKETS_PER_PUMP = 32;
+    const PUMP_DELAY_ACTIVE_MS = 1;
+    const PUMP_DELAY_BACKPRESSURE_MS = 4;
 
-    const GAUGE_MAX_MBPS = 10000;
+    const GAUGE_MAX_MBPS = 500;
     const GAUGE_RADIUS = 164;
     const GAUGE_CIRCUMFERENCE = 2 * Math.PI * GAUGE_RADIUS;
 
-    const DISPLAY_SMOOTH_ALPHA_UP = 0.28;
-    const DISPLAY_SMOOTH_ALPHA_DOWN = 0.16;
+    const DISPLAY_SMOOTH_ALPHA_UP = 0.22;
+    const DISPLAY_SMOOTH_ALPHA_DOWN = 0.1;
     const GAUGE_LERP_FACTOR = 0.16;
+    const SPEED_WINDOW_SIZE = 12;
+    const ZERO_DROP_PROTECT_THRESHOLD_MBPS = 40;
+    const ZERO_DROP_DECAY = 0.9;
 
     let socket = null;
     let isRunning = false;
     let uploadPumpTimer = null;
     let gaugeAnimationId = null;
+    let pingInterval = null;
 
     let smoothedDownloadMbps = 0;
     let smoothedUploadMbps = 0;
     let targetGaugeMbps = 0;
     let visibleGaugeMbps = 0;
+    let latencyMs = 0;
+    let downloadSamples = [];
+    let uploadSamples = [];
 
     gaugeProgressEl.style.strokeDasharray = `${GAUGE_CIRCUMFERENCE}`;
     gaugeProgressEl.style.strokeDashoffset = `${GAUGE_CIRCUMFERENCE}`;
@@ -363,6 +391,28 @@
 
     function formatMbpsValue(mbps) {
       return `${mbps.toFixed(2)} Mbps`;
+    }
+
+    function pushSample(samples, value) {
+      samples.push(value);
+      if (samples.length > SPEED_WINDOW_SIZE) {
+        samples.shift();
+      }
+    }
+
+    function averageSamples(samples) {
+      if (samples.length === 0) {
+        return 0;
+      }
+      const total = samples.reduce((sum, item) => sum + item, 0);
+      return total / samples.length;
+    }
+
+    function stabilizeDropToZero(rawMbps, previousSmoothedMbps) {
+      if (rawMbps < 1 && previousSmoothedMbps >= ZERO_DROP_PROTECT_THRESHOLD_MBPS) {
+        return previousSmoothedMbps * ZERO_DROP_DECAY;
+      }
+      return rawMbps;
     }
 
     function renderGauge(mbps) {
@@ -422,8 +472,13 @@
       smoothedUploadMbps = 0;
       targetGaugeMbps = 0;
       visibleGaugeMbps = 0;
+      latencyMs = 0;
+      downloadSamples = [];
+      uploadSamples = [];
       downloadEl.textContent = formatMbpsValue(0);
       uploadEl.textContent = formatMbpsValue(0);
+      latencyEl.textContent = '-- ms';
+      activeConnectionsEl.textContent = '0';
       renderGauge(0);
     }
 
@@ -432,6 +487,49 @@
         return;
       }
       socket.send(JSON.stringify(message));
+    }
+
+    function startPing() {
+      if (pingInterval) {
+        clearInterval(pingInterval);
+      }
+
+      pingInterval = setInterval(() => {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          sendJson({
+            type: 'ping',
+            timestamp: Date.now()
+          });
+        }
+      }, 2000); // Ping every 2 seconds
+    }
+
+    function stopPing() {
+      if (pingInterval) {
+        clearInterval(pingInterval);
+        pingInterval = null;
+      }
+    }
+
+    async function loadNetworkInfo() {
+      try {
+        const response = await fetch('/network-info');
+        const data = await response.json();
+
+        const activeInterfaces = Object.entries(data.interfaces)
+          .filter(([name, interfaces]) =>
+            interfaces.some(iface => iface.family === 'IPv4' && !iface.internal)
+          );
+
+        if (activeInterfaces.length > 0) {
+          const interfaceNames = activeInterfaces.map(([name]) => name).join(', ');
+          networkInterfaceEl.textContent = interfaceNames;
+        } else {
+          networkInterfaceEl.textContent = 'No network detected';
+        }
+      } catch (error) {
+        networkInterfaceEl.textContent = 'Unknown';
+      }
     }
 
     function stopUploadLoop() {
@@ -462,9 +560,17 @@
         return;
       }
 
+      if (socket.bufferedAmount >= UPLOAD_BUFFER_HIGH_BYTES) {
+        uploadPumpTimer = setTimeout(() => {
+          uploadPumpTimer = null;
+          runUploadPump();
+        }, PUMP_DELAY_BACKPRESSURE_MS);
+        return;
+      }
+
       let packetsSent = 0;
       while (
-        socket.bufferedAmount < MAX_BUFFERED_BYTES_HIGH &&
+        socket.bufferedAmount < UPLOAD_BUFFER_LOW_BYTES &&
         packetsSent < MAX_PACKETS_PER_PUMP &&
         isRunning &&
         socket.readyState === WebSocket.OPEN
@@ -473,7 +579,10 @@
         packetsSent += 1;
       }
 
-      scheduleUploadPump();
+      uploadPumpTimer = setTimeout(() => {
+        uploadPumpTimer = null;
+        runUploadPump();
+      }, PUMP_DELAY_ACTIVE_MS);
     }
 
     function startUploadLoop() {
@@ -481,15 +590,29 @@
       scheduleUploadPump();
     }
 
-    function applyMetrics(downloadBps, uploadBps) {
+    function applyMetrics(downloadBps, uploadBps, globalStats) {
       const rawDownloadMbps = (downloadBps * 8) / 1_000_000;
       const rawUploadMbps = (uploadBps * 8) / 1_000_000;
 
-      smoothedDownloadMbps = smoothValue(smoothedDownloadMbps, rawDownloadMbps);
-      smoothedUploadMbps = smoothValue(smoothedUploadMbps, rawUploadMbps);
+      const stabilizedDownload = stabilizeDropToZero(rawDownloadMbps, smoothedDownloadMbps);
+      const stabilizedUpload = stabilizeDropToZero(rawUploadMbps, smoothedUploadMbps);
+
+      pushSample(downloadSamples, stabilizedDownload);
+      pushSample(uploadSamples, stabilizedUpload);
+
+      const averagedDownload = averageSamples(downloadSamples);
+      const averagedUpload = averageSamples(uploadSamples);
+
+      smoothedDownloadMbps = smoothValue(smoothedDownloadMbps, averagedDownload);
+      smoothedUploadMbps = smoothValue(smoothedUploadMbps, averagedUpload);
 
       downloadEl.textContent = formatMbpsValue(smoothedDownloadMbps);
       uploadEl.textContent = formatMbpsValue(smoothedUploadMbps);
+
+      // Update global connection stats if available
+      if (globalStats) {
+        activeConnectionsEl.textContent = globalStats.activeConnections || '0';
+      }
 
       if (modeEl.value === 'download') {
         targetGaugeMbps = smoothedDownloadMbps;
@@ -507,6 +630,7 @@
 
       socket.onopen = () => {
         setStatus('Connected - idle');
+        startPing();
       };
 
       socket.onmessage = (event) => {
@@ -522,7 +646,13 @@
         }
 
         if (payload.type === 'metrics') {
-          applyMetrics(payload.downloadBps || 0, payload.uploadBps || 0);
+          applyMetrics(payload.downloadBps || 0, payload.uploadBps || 0, payload.globalStats);
+        }
+
+        if (payload.type === 'pong') {
+          const now = Date.now();
+          latencyMs = now - payload.timestamp;
+          latencyEl.textContent = `${latencyMs} ms`;
         }
       };
 
@@ -532,6 +662,7 @@
         stopButton.disabled = true;
         stopUploadLoop();
         stopGaugeAnimator();
+        stopPing();
         resetDisplays();
         updateGaugeModeLabel();
         setStatus('Disconnected');
@@ -603,6 +734,7 @@
 
     updateGaugeModeLabel();
     resetDisplays();
+    loadNetworkInfo();
     connect();
   </script>
 </body>
