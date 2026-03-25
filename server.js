@@ -4,7 +4,7 @@ const os = require('os');
 const path = require('path');
 const WebSocket = require('ws');
 
-const PORT = process.env.PORT || 1214;
+const PORT = process.env.PORT || 1234;
 const DOWNLOAD_CHUNK_SIZE = 256 * 1024;
 const DOWNLOAD_BUFFER_LOW_BYTES = 2 * 1024 * 1024;
 const DOWNLOAD_BUFFER_HIGH_BYTES = 8 * 1024 * 1024;
