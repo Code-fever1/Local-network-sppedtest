@@ -5,10 +5,10 @@ const path = require('path');
 const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 1234;
-const DOWNLOAD_CHUNK_SIZE = 256 * 1024;
-const DOWNLOAD_BUFFER_LOW_BYTES = 2 * 1024 * 1024;
-const DOWNLOAD_BUFFER_HIGH_BYTES = 8 * 1024 * 1024;
-const MAX_PACKETS_PER_PUMP = 32;
+const DOWNLOAD_CHUNK_SIZE = 128 * 1024;
+const DOWNLOAD_BUFFER_LOW_BYTES = 512 * 1024;
+const DOWNLOAD_BUFFER_HIGH_BYTES = 1.5 * 1024 * 1024;
+const MAX_PACKETS_PER_PUMP = 16;
 const PUMP_DELAY_ACTIVE_MS = 1;
 const PUMP_DELAY_BACKPRESSURE_MS = 4;
 const METRICS_INTERVAL_MS = 250;
