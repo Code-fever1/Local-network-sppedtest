@@ -87,32 +87,88 @@
     .gauge svg {
       width: 100%;
       height: 100%;
-      transform: rotate(-90deg);
       filter: drop-shadow(0 0 12px rgba(34, 211, 238, 0.2));
     }
 
     .gaugeTrack {
       fill: none;
       stroke: rgba(255, 255, 255, 0.05);
-      stroke-width: 18;
+      stroke-width: 40;
+    }
+
+    .gaugeTrackDual {
+      opacity: 0;
+      transition: opacity 0.25s ease;
     }
 
     .gaugeProgress {
-      fill: none;
-      stroke-width: 18;
-      stroke-linecap: round;
-      stroke: url(#gaugeGradient);
+      fill:none;
+      stroke-width: 38;
+      
       filter: drop-shadow(0 0 8px rgba(34, 211, 238, 0.4));
-      transition: stroke-dashoffset 0.1s linear;
+      transition: stroke-dasharray 0.2s linear, opacity 0.25s ease;
+    }
+
+    .gaugeProgressSingle {
+      stroke: url(#gaugeGradient);
+      opacity: 1;
+    }
+
+    .gaugeProgressDownload {
+      stroke: #22d3ee;
+      stroke-width: 22;
+      opacity: 0;
+      filter: drop-shadow(0 0 10px rgba(34, 211, 238, 0.45));
+    }
+
+    .gaugeProgressUpload {
+      stroke: #f97316;
+      stroke-width: 22;
+      opacity: 0;
+      filter: drop-shadow(0 0 10px rgba(249, 115, 22, 0.45));
+    }
+
+    .gauge.dual-mode .gaugeTrack {
+      stroke-width: 30;
+    }
+
+    .gauge.dual-mode .gaugeTrackDual,
+    .gauge.dual-mode .gaugeProgressDownload,
+    .gauge.dual-mode .gaugeProgressUpload {
+      opacity: 1;
+    }
+
+    .gauge.dual-mode .gaugeProgressSingle {
+      opacity: 0;
+    }
+
+    .gaugeNeedle {
+      stroke: rgba(96, 96, 96, 0.406);
+      stroke-width: 18;
+      
+      
+      filter: drop-shadow(0 2px 8px rgba(15, 23, 42, 0.9));
+    }
+
+    .gaugeNeedleHub {
+      fill: transparent;
+    }
+
+    .gaugeScaleLabel {
+      fill: rgba(226, 232, 240, 0.78);
+      font-size: 22px;
+      font-weight: 700;
+      text-anchor: middle;
+      dominant-baseline: middle;
+      letter-spacing: 0.01em;
+      -webkit-user-select: none;
+      user-select: none;
     }
 
     .gaugeCenter {
       position: absolute;
       inset: 0;
-      display: flex;
-      flex-direction: column;
-      justify-content: center;
-      align-items: center;
+      display: none;
       pointer-events: none;
     }
 
@@ -272,8 +328,15 @@
               <stop offset="100%" stop-color="#818cf8"></stop>
             </linearGradient>
           </defs>
-          <circle class="gaugeTrack" cx="210" cy="210" r="180"></circle>
-          <circle class="gaugeProgress" id="gaugeProgress" cx="210" cy="210" r="180"></circle>
+          <circle class="gaugeTrack" id="gaugeTrack" cx="210" cy="210" r="180"></circle>
+          <circle class="gaugeTrack gaugeTrackDual" id="gaugeTrackDualDownload" cx="210" cy="210" r="188"></circle>
+          <circle class="gaugeTrack gaugeTrackDual" id="gaugeTrackDualUpload" cx="210" cy="210" r="172"></circle>
+          <circle class="gaugeProgress gaugeProgressSingle" id="gaugeProgressSingle" cx="210" cy="210" r="180"></circle>
+          <circle class="gaugeProgress gaugeProgressDownload" id="gaugeProgressDownload" cx="210" cy="210" r="188"></circle>
+          <circle class="gaugeProgress gaugeProgressUpload" id="gaugeProgressUpload" cx="210" cy="210" r="172"></circle>
+          <g id="gaugeScaleLabels"></g>
+          <line class="gaugeNeedle" id="gaugeNeedle" x1="210" y1="210" x2="340" y2="210"></line>
+          <circle class="gaugeNeedleHub" cx="210" cy="210" r="12"></circle>
         </svg>
         <div class="gaugeCenter">
           <div class="gaugeValue" id="gaugeValue">0.00</div>
@@ -312,9 +375,8 @@
 
     <div class="controls-section">
       <select id="mode">
-        <option value="both">Both (Upload + Download)</option>
-        <option value="download">Download only</option>
-        <option value="upload">Upload only</option>
+        <option value="download" selected>Download</option>
+        <option value="upload">Upload</option>
       </select>
 
       <div class="action-buttons">
@@ -331,7 +393,15 @@
     const latencyEl = document.getElementById('latency');
     const networkInterfaceEl = document.getElementById('networkInterface');
     const activeConnectionsEl = document.getElementById('activeConnections');
-    const gaugeProgressEl = document.getElementById('gaugeProgress');
+    const gaugeEl = document.querySelector('.gauge');
+    const gaugeTrackEl = document.getElementById('gaugeTrack');
+    const gaugeTrackDualDownloadEl = document.getElementById('gaugeTrackDualDownload');
+    const gaugeTrackDualUploadEl = document.getElementById('gaugeTrackDualUpload');
+    const gaugeProgressSingleEl = document.getElementById('gaugeProgressSingle');
+    const gaugeProgressDownloadEl = document.getElementById('gaugeProgressDownload');
+    const gaugeProgressUploadEl = document.getElementById('gaugeProgressUpload');
+    const gaugeScaleLabelsEl = document.getElementById('gaugeScaleLabels');
+    const gaugeNeedleEl = document.getElementById('gaugeNeedle');
     const gaugeValueEl = document.getElementById('gaugeValue');
     const gaugeModeEl = document.getElementById('gaugeMode');
     const modeEl = document.getElementById('mode');
@@ -346,8 +416,29 @@
     const PUMP_DELAY_BACKPRESSURE_MS = 4;
 
     const GAUGE_MAX_MBPS = 500;
-    const GAUGE_RADIUS = 180;
-    const GAUGE_CIRCUMFERENCE = 2 * Math.PI * GAUGE_RADIUS;
+    const GAUGE_CENTER = 210;
+    const GAUGE_START_ANGLE_DEG = 133.2;
+    const GAUGE_SWEEP_RATIO = 0.76;
+    const GAUGE_SWEEP_DEG = 360 * GAUGE_SWEEP_RATIO;
+    const GAUGE_LABEL_RADIUS = 138;
+    const GAUGE_SCALE_VALUES = [0, 50, 100, 200, 300, 400, 500];
+    const GAUGE_GEOMETRY = {
+      single: {
+        radius: 180,
+        circumference: 2 * Math.PI * 180,
+      },
+      download: {
+        radius: 188,
+        circumference: 2 * Math.PI * 188,
+      },
+      upload: {
+        radius: 172,
+        circumference: 2 * Math.PI * 172,
+      }
+    };
+    GAUGE_GEOMETRY.single.arcLength = GAUGE_GEOMETRY.single.circumference * GAUGE_SWEEP_RATIO;
+    GAUGE_GEOMETRY.download.arcLength = GAUGE_GEOMETRY.download.circumference * GAUGE_SWEEP_RATIO;
+    GAUGE_GEOMETRY.upload.arcLength = GAUGE_GEOMETRY.upload.circumference * GAUGE_SWEEP_RATIO;
 
     const DISPLAY_SMOOTH_ALPHA_UP = 0.22;
     const DISPLAY_SMOOTH_ALPHA_DOWN = 0.1;
@@ -364,14 +455,69 @@
 
     let smoothedDownloadMbps = 0;
     let smoothedUploadMbps = 0;
-    let targetGaugeMbps = 0;
-    let visibleGaugeMbps = 0;
+    let targetGaugeSingleMbps = 0;
+    let visibleGaugeSingleMbps = 0;
+    let targetGaugeDownloadMbps = 0;
+    let visibleGaugeDownloadMbps = 0;
+    let targetGaugeUploadMbps = 0;
+    let visibleGaugeUploadMbps = 0;
     let latencyMs = 0;
     let downloadSamples = [];
     let uploadSamples = [];
 
-    gaugeProgressEl.style.strokeDasharray = `${GAUGE_CIRCUMFERENCE}`;
-    gaugeProgressEl.style.strokeDashoffset = `${GAUGE_CIRCUMFERENCE}`;
+    function configureGaugeArc(element, geometry, isTrack = false) {
+      element.setAttribute('transform', `rotate(${GAUGE_START_ANGLE_DEG} ${GAUGE_CENTER} ${GAUGE_CENTER})`);
+      if (isTrack) {
+        element.style.strokeDasharray = `${geometry.arcLength} ${geometry.circumference}`;
+      } else {
+        element.style.strokeDasharray = `0 ${geometry.circumference}`;
+      }
+      element.style.strokeDashoffset = '0';
+    }
+
+    function setGaugeArcProgress(element, geometry, mbps) {
+      const clamped = Math.max(0, Math.min(mbps, GAUGE_MAX_MBPS));
+      const ratio = clamped / GAUGE_MAX_MBPS;
+      const visibleArc = geometry.arcLength * ratio;
+      element.style.strokeDasharray = `${visibleArc} ${geometry.circumference}`;
+      return clamped;
+    }
+
+    function polarToCartesian(angleDeg, radius) {
+      const radians = (angleDeg * Math.PI) / 180;
+      return {
+        x: GAUGE_CENTER + Math.cos(radians) * radius,
+        y: GAUGE_CENTER + Math.sin(radians) * radius,
+      };
+    }
+
+    function renderGaugeScaleLabels() {
+      if (!gaugeScaleLabelsEl) {
+        return;
+      }
+
+      gaugeScaleLabelsEl.textContent = '';
+
+      for (const value of GAUGE_SCALE_VALUES) {
+        const ratio = value / GAUGE_MAX_MBPS;
+        const angle = GAUGE_START_ANGLE_DEG + ratio * GAUGE_SWEEP_DEG;
+        const point = polarToCartesian(angle, GAUGE_LABEL_RADIUS);
+        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        label.setAttribute('class', 'gaugeScaleLabel');
+        label.setAttribute('x', point.x.toFixed(1));
+        label.setAttribute('y', point.y.toFixed(1));
+        label.textContent = String(value);
+        gaugeScaleLabelsEl.appendChild(label);
+      }
+    }
+
+    configureGaugeArc(gaugeTrackEl, GAUGE_GEOMETRY.single, true);
+    configureGaugeArc(gaugeTrackDualDownloadEl, GAUGE_GEOMETRY.download, true);
+    configureGaugeArc(gaugeTrackDualUploadEl, GAUGE_GEOMETRY.upload, true);
+    configureGaugeArc(gaugeProgressSingleEl, GAUGE_GEOMETRY.single);
+    configureGaugeArc(gaugeProgressDownloadEl, GAUGE_GEOMETRY.download);
+    configureGaugeArc(gaugeProgressUploadEl, GAUGE_GEOMETRY.upload);
+    renderGaugeScaleLabels();
 
     function setStatus(text) {
       statusEl.textContent = text;
@@ -408,12 +554,20 @@
       return rawMbps;
     }
 
-    function renderGauge(mbps) {
-      const clamped = Math.max(0, Math.min(mbps, GAUGE_MAX_MBPS));
-      const ratio = clamped / GAUGE_MAX_MBPS;
-      const offset = GAUGE_CIRCUMFERENCE * (1 - ratio);
-      gaugeProgressEl.style.strokeDashoffset = `${offset}`;
-      gaugeValueEl.textContent = mbps.toFixed(2);
+    function renderGauge() {
+      gaugeEl.classList.remove('dual-mode');
+
+      const displayValue = setGaugeArcProgress(gaugeProgressSingleEl, GAUGE_GEOMETRY.single, visibleGaugeSingleMbps);
+      setGaugeArcProgress(gaugeProgressDownloadEl, GAUGE_GEOMETRY.download, 0);
+      setGaugeArcProgress(gaugeProgressUploadEl, GAUGE_GEOMETRY.upload, 0);
+
+      gaugeValueEl.textContent = displayValue.toFixed(2);
+
+      if (gaugeNeedleEl) {
+        const ratio = Math.max(0, Math.min(displayValue, GAUGE_MAX_MBPS)) / GAUGE_MAX_MBPS;
+        const angle = GAUGE_START_ANGLE_DEG + ratio * GAUGE_SWEEP_DEG;
+        gaugeNeedleEl.setAttribute('transform', `rotate(${angle} ${GAUGE_CENTER} ${GAUGE_CENTER})`);
+      }
     }
 
     function startGaugeAnimator() {
@@ -422,11 +576,21 @@
       }
 
       const frame = () => {
-        visibleGaugeMbps += (targetGaugeMbps - visibleGaugeMbps) * GAUGE_LERP_FACTOR;
-        if (Math.abs(visibleGaugeMbps - targetGaugeMbps) < 0.03) {
-          visibleGaugeMbps = targetGaugeMbps;
+        visibleGaugeSingleMbps += (targetGaugeSingleMbps - visibleGaugeSingleMbps) * GAUGE_LERP_FACTOR;
+        visibleGaugeDownloadMbps += (targetGaugeDownloadMbps - visibleGaugeDownloadMbps) * GAUGE_LERP_FACTOR;
+        visibleGaugeUploadMbps += (targetGaugeUploadMbps - visibleGaugeUploadMbps) * GAUGE_LERP_FACTOR;
+
+        if (Math.abs(visibleGaugeSingleMbps - targetGaugeSingleMbps) < 0.03) {
+          visibleGaugeSingleMbps = targetGaugeSingleMbps;
         }
-        renderGauge(visibleGaugeMbps);
+        if (Math.abs(visibleGaugeDownloadMbps - targetGaugeDownloadMbps) < 0.03) {
+          visibleGaugeDownloadMbps = targetGaugeDownloadMbps;
+        }
+        if (Math.abs(visibleGaugeUploadMbps - targetGaugeUploadMbps) < 0.03) {
+          visibleGaugeUploadMbps = targetGaugeUploadMbps;
+        }
+
+        renderGauge();
         gaugeAnimationId = requestAnimationFrame(frame);
       };
 
@@ -457,14 +621,31 @@
         return;
       }
 
-      gaugeModeEl.textContent = 'Both (Higher of two)';
+      gaugeModeEl.textContent = 'Upload';
+    }
+
+    function setGaugeTargetsFromMode() {
+      if (modeEl.value === 'download') {
+        targetGaugeSingleMbps = smoothedDownloadMbps;
+        targetGaugeDownloadMbps = 0;
+        targetGaugeUploadMbps = 0;
+        return;
+      }
+
+      targetGaugeSingleMbps = smoothedUploadMbps;
+      targetGaugeDownloadMbps = 0;
+      targetGaugeUploadMbps = 0;
     }
 
     function resetDisplays() {
       smoothedDownloadMbps = 0;
       smoothedUploadMbps = 0;
-      targetGaugeMbps = 0;
-      visibleGaugeMbps = 0;
+      targetGaugeSingleMbps = 0;
+      visibleGaugeSingleMbps = 0;
+      targetGaugeDownloadMbps = 0;
+      visibleGaugeDownloadMbps = 0;
+      targetGaugeUploadMbps = 0;
+      visibleGaugeUploadMbps = 0;
       latencyMs = 0;
       downloadSamples = [];
       uploadSamples = [];
@@ -472,7 +653,7 @@
       uploadEl.textContent = formatMbpsValue(0);
       latencyEl.textContent = '-- ms';
       activeConnectionsEl.textContent = '0';
-      renderGauge(0);
+      renderGauge();
     }
 
     function sendJson(message) {
@@ -549,7 +730,7 @@
       }
 
       const mode = modeEl.value;
-      if (mode !== 'upload' && mode !== 'both') {
+      if (mode !== 'upload') {
         return;
       }
 
@@ -607,13 +788,7 @@
         activeConnectionsEl.textContent = globalStats.activeConnections || '0';
       }
 
-      if (modeEl.value === 'download') {
-        targetGaugeMbps = smoothedDownloadMbps;
-      } else if (modeEl.value === 'upload') {
-        targetGaugeMbps = smoothedUploadMbps;
-      } else {
-        targetGaugeMbps = Math.max(smoothedDownloadMbps, smoothedUploadMbps);
-      }
+      setGaugeTargetsFromMode();
     }
 
     function connect() {
@@ -700,9 +875,13 @@
       sendJson({ type: 'stop' });
       stopUploadLoop();
       stopGaugeAnimator();
-      targetGaugeMbps = 0;
-      visibleGaugeMbps = 0;
-      renderGauge(0);
+      targetGaugeSingleMbps = 0;
+      visibleGaugeSingleMbps = 0;
+      targetGaugeDownloadMbps = 0;
+      visibleGaugeDownloadMbps = 0;
+      targetGaugeUploadMbps = 0;
+      visibleGaugeUploadMbps = 0;
+      renderGauge();
       updateGaugeModeLabel();
       setStatus('Stopped manually');
     });
@@ -715,13 +894,8 @@
 
       sendJson({ type: 'mode', mode: modeEl.value });
       setStatus(`Running (${modeEl.value}) - no time limit`);
-      if (modeEl.value === 'download') {
-        targetGaugeMbps = smoothedDownloadMbps;
-      } else if (modeEl.value === 'upload') {
-        targetGaugeMbps = smoothedUploadMbps;
-      } else {
-        targetGaugeMbps = Math.max(smoothedDownloadMbps, smoothedUploadMbps);
-      }
+      setGaugeTargetsFromMode();
+      renderGauge();
       startUploadLoop();
     });
 
