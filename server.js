@@ -6,11 +6,20 @@ const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 1234;
 const DOWNLOAD_CHUNK_SIZE = 128 * 1024;
-const DOWNLOAD_BUFFER_LOW_BYTES = 512 * 1024;
-const DOWNLOAD_BUFFER_HIGH_BYTES = 1.5 * 1024 * 1024;
-const MAX_PACKETS_PER_PUMP = 16;
-const PUMP_DELAY_ACTIVE_MS = 1;
-const PUMP_DELAY_BACKPRESSURE_MS = 4;
+const DOWNLOAD_PROFILE_SINGLE = {
+  lowBufferBytes: 512 * 1024,
+  highBufferBytes: 1.5 * 1024 * 1024,
+  maxPacketsPerPump: 16,
+  activeDelayMs: 1,
+  backpressureDelayMs: 4,
+};
+const DOWNLOAD_PROFILE_BOTH = {
+  lowBufferBytes: 256 * 1024,
+  highBufferBytes: 896 * 1024,
+  maxPacketsPerPump: 8,
+  activeDelayMs: 2,
+  backpressureDelayMs: 6,
+};
 const METRICS_INTERVAL_MS = 250;
 
 const app = express();
@@ -64,7 +73,11 @@ app.get('/connections', (_req, res) => {
 });
 
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server, path: '/speed' });
+const wss = new WebSocket.Server({
+  server,
+  path: '/speed',
+  perMessageDeflate: false,
+});
 
 // Track active connections
 const connections = new Map();
@@ -134,22 +147,28 @@ wss.on('connection', (socket, req) => {
     state.sendLoopActive = false;
   };
 
+  const getDownloadPumpProfile = () => (
+    state.uploadActive && state.downloadActive ? DOWNLOAD_PROFILE_BOTH : DOWNLOAD_PROFILE_SINGLE
+  );
+
   const runDownloadPump = () => {
     if (!state.sendLoopActive || !state.downloadActive || socket.readyState !== WebSocket.OPEN) {
       state.sendLoopActive = false;
       return;
     }
 
-    if (socket.bufferedAmount >= DOWNLOAD_BUFFER_HIGH_BYTES) {
-      setTimeout(runDownloadPump, PUMP_DELAY_BACKPRESSURE_MS);
+    const profile = getDownloadPumpProfile();
+
+    if (socket.bufferedAmount >= profile.highBufferBytes) {
+      setTimeout(runDownloadPump, profile.backpressureDelayMs);
       return;
     }
 
     let packetsSent = 0;
 
     while (
-      socket.bufferedAmount < DOWNLOAD_BUFFER_LOW_BYTES &&
-      packetsSent < MAX_PACKETS_PER_PUMP &&
+      socket.bufferedAmount < profile.lowBufferBytes &&
+      packetsSent < profile.maxPacketsPerPump &&
       state.downloadActive &&
       socket.readyState === WebSocket.OPEN
     ) {
@@ -162,7 +181,7 @@ wss.on('connection', (socket, req) => {
       packetsSent += 1;
     }
 
-    setTimeout(runDownloadPump, PUMP_DELAY_ACTIVE_MS);
+    setTimeout(runDownloadPump, profile.activeDelayMs);
   };
 
   const startSendLoop = () => {

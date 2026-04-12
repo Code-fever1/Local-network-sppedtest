@@ -114,6 +114,11 @@
       opacity: 1;
     }
 
+    .gauge.upload-mode .gaugeProgressSingle {
+      stroke: #f97316;
+      filter: drop-shadow(0 0 10px rgba(249, 115, 22, 0.45));
+    }
+
     .gaugeProgressDownload {
       stroke: #22d3ee;
       stroke-width: 22;
@@ -168,15 +173,19 @@
     .gaugeCenter {
       position: absolute;
       inset: 0;
-      display: none;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
       pointer-events: none;
     }
 
     .gaugeValue {
-      font-size: 4rem;
+      font-size: 2rem;
       font-weight: 800;
       line-height: 1;
       letter-spacing: -0.02em;
+      margin-top: 5%;
       background: linear-gradient(to bottom right, #fff, #cbd5e1);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
@@ -190,7 +199,10 @@
     }
 
     .gaugeMode {
-      margin-top: 12px;
+
+
+
+      margin-top: 70%;
       color: #818cf8;
       font-weight: 700;
       font-size: 0.8rem;
@@ -248,7 +260,7 @@
     }
 
     .controls-section {
-      margin-top: 24px;
+      margin-top: 20px;
       display: flex;
       flex-direction: column;
       gap: 12px;
@@ -267,10 +279,16 @@
       border: 1px solid rgba(255, 255, 255, 0.1);
       border-radius: 14px;
       padding: 14px 16px;
-      color: white;
+      color: var(--text-main);
       font-size: 1rem;
       font-weight: 500;
       outline: none;
+    }
+
+    /* Keep native dropdown options readable on mobile browsers with light popups. */
+    select option {
+      color: #0f172a;
+      background-color: #f8fafc;
     }
 
     .action-buttons {
@@ -339,9 +357,10 @@
           <circle class="gaugeNeedleHub" cx="210" cy="210" r="12"></circle>
         </svg>
         <div class="gaugeCenter">
+           <div class="gaugeMode" id="gaugeMode">Idle</div>
           <div class="gaugeValue" id="gaugeValue">0.00</div>
           <div class="gaugeUnit">Mbps</div>
-          <div class="gaugeMode" id="gaugeMode">Idle</div>
+          
         </div>
       </div>
     </div>
@@ -374,9 +393,19 @@
     </div>
 
     <div class="controls-section">
-      <select id="mode">
+      <select id="mode" title="Test mode">
         <option value="download" selected>Download</option>
         <option value="upload">Upload</option>
+        <option value="both">Both</option>
+      </select>
+
+      <select id="gaugeRange" title="Gauge max range">
+        <option value="20">20 Mbps Meter</option>
+        <option value="50">50 Mbps Meter</option>
+        <option value="100">100 Mbps Meter</option>
+        <option value="300">300 Mbps Meter</option>
+        <option value="500" selected>500 Mbps Meter</option>
+        <option value="1000">1000 Mbps Meter</option>
       </select>
 
       <div class="action-buttons">
@@ -405,23 +434,39 @@
     const gaugeValueEl = document.getElementById('gaugeValue');
     const gaugeModeEl = document.getElementById('gaugeMode');
     const modeEl = document.getElementById('mode');
+    const gaugeRangeEl = document.getElementById('gaugeRange');
     const startButton = document.getElementById('start');
     const stopButton = document.getElementById('stop');
 
     const uploadChunk = new Uint8Array(64 * 1024).fill(97);
-    const UPLOAD_BUFFER_LOW_BYTES = 512 * 1024;
-    const UPLOAD_BUFFER_HIGH_BYTES = 1.5 * 1024 * 1024;
-    const MAX_PACKETS_PER_PUMP = 16;
-    const PUMP_DELAY_ACTIVE_MS = 1;
-    const PUMP_DELAY_BACKPRESSURE_MS = 4;
+    const UPLOAD_PUMP_PROFILE_SINGLE = {
+      lowBufferBytes: 512 * 1024,
+      highBufferBytes: 1.5 * 1024 * 1024,
+      maxPacketsPerPump: 16,
+      activeDelayMs: 1,
+      backpressureDelayMs: 4,
+    };
+    const UPLOAD_PUMP_PROFILE_BOTH = {
+      lowBufferBytes: 192 * 1024,
+      highBufferBytes: 768 * 1024,
+      maxPacketsPerPump: 6,
+      activeDelayMs: 2,
+      backpressureDelayMs: 6,
+    };
 
-    const GAUGE_MAX_MBPS = 500;
+    const GAUGE_SCALE_STEP_BY_MAX = {
+      20: 5,
+      50: 10,
+      100: 20,
+      300: 50,
+      500: 100,
+      1000: 200,
+    };
     const GAUGE_CENTER = 210;
     const GAUGE_START_ANGLE_DEG = 133.2;
     const GAUGE_SWEEP_RATIO = 0.76;
     const GAUGE_SWEEP_DEG = 360 * GAUGE_SWEEP_RATIO;
     const GAUGE_LABEL_RADIUS = 138;
-    const GAUGE_SCALE_VALUES = [0, 50, 100, 200, 300, 400, 500];
     const GAUGE_GEOMETRY = {
       single: {
         radius: 180,
@@ -464,6 +509,36 @@
     let latencyMs = 0;
     let downloadSamples = [];
     let uploadSamples = [];
+    let gaugeMaxMbps = Number(gaugeRangeEl.value);
+    let clientDownloadBytes = 0;
+    let clientDownloadLastAt = Date.now();
+
+    function getGaugeScaleValues(maxMbps) {
+      const safeMax = Number.isFinite(maxMbps) && maxMbps > 0 ? maxMbps : 500;
+      const step = GAUGE_SCALE_STEP_BY_MAX[safeMax] || Math.max(1, Math.round(safeMax / 5));
+      const values = [];
+
+      for (let value = 0; value <= safeMax; value += step) {
+        values.push(value);
+      }
+
+      if (values[values.length - 1] !== safeMax) {
+        values.push(safeMax);
+      }
+
+      return values;
+    }
+
+    function setGaugeMax(nextMaxMbps) {
+      if (!Number.isFinite(nextMaxMbps) || nextMaxMbps <= 0) {
+        return;
+      }
+
+      gaugeMaxMbps = nextMaxMbps;
+      renderGaugeScaleLabels();
+      setGaugeTargetsFromMode();
+      renderGauge();
+    }
 
     function configureGaugeArc(element, geometry, isTrack = false) {
       element.setAttribute('transform', `rotate(${GAUGE_START_ANGLE_DEG} ${GAUGE_CENTER} ${GAUGE_CENTER})`);
@@ -476,8 +551,9 @@
     }
 
     function setGaugeArcProgress(element, geometry, mbps) {
-      const clamped = Math.max(0, Math.min(mbps, GAUGE_MAX_MBPS));
-      const ratio = clamped / GAUGE_MAX_MBPS;
+      const safeMax = Math.max(gaugeMaxMbps, 1);
+      const clamped = Math.max(0, Math.min(mbps, safeMax));
+      const ratio = clamped / safeMax;
       const visibleArc = geometry.arcLength * ratio;
       element.style.strokeDasharray = `${visibleArc} ${geometry.circumference}`;
       return clamped;
@@ -496,10 +572,11 @@
         return;
       }
 
+      const scaleValues = getGaugeScaleValues(gaugeMaxMbps);
       gaugeScaleLabelsEl.textContent = '';
 
-      for (const value of GAUGE_SCALE_VALUES) {
-        const ratio = value / GAUGE_MAX_MBPS;
+      for (const value of scaleValues) {
+        const ratio = value / gaugeMaxMbps;
         const angle = GAUGE_START_ANGLE_DEG + ratio * GAUGE_SWEEP_DEG;
         const point = polarToCartesian(angle, GAUGE_LABEL_RADIUS);
         const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
@@ -555,16 +632,18 @@
     }
 
     function renderGauge() {
-      gaugeEl.classList.remove('dual-mode');
+      gaugeEl.classList.toggle('dual-mode', modeEl.value === 'both');
+      gaugeEl.classList.toggle('upload-mode', modeEl.value === 'upload');
 
       const displayValue = setGaugeArcProgress(gaugeProgressSingleEl, GAUGE_GEOMETRY.single, visibleGaugeSingleMbps);
-      setGaugeArcProgress(gaugeProgressDownloadEl, GAUGE_GEOMETRY.download, 0);
-      setGaugeArcProgress(gaugeProgressUploadEl, GAUGE_GEOMETRY.upload, 0);
+      setGaugeArcProgress(gaugeProgressDownloadEl, GAUGE_GEOMETRY.download, visibleGaugeDownloadMbps);
+      setGaugeArcProgress(gaugeProgressUploadEl, GAUGE_GEOMETRY.upload, visibleGaugeUploadMbps);
 
       gaugeValueEl.textContent = displayValue.toFixed(2);
 
       if (gaugeNeedleEl) {
-        const ratio = Math.max(0, Math.min(displayValue, GAUGE_MAX_MBPS)) / GAUGE_MAX_MBPS;
+        const safeMax = Math.max(gaugeMaxMbps, 1);
+        const ratio = Math.max(0, Math.min(displayValue, safeMax)) / safeMax;
         const angle = GAUGE_START_ANGLE_DEG + ratio * GAUGE_SWEEP_DEG;
         gaugeNeedleEl.setAttribute('transform', `rotate(${angle} ${GAUGE_CENTER} ${GAUGE_CENTER})`);
       }
@@ -621,10 +700,62 @@
         return;
       }
 
-      gaugeModeEl.textContent = 'Upload';
+      gaugeModeEl.textContent = 'Both';
+    }
+
+    function isUploadModeEnabled() {
+      return modeEl.value === 'upload' || modeEl.value === 'both';
+    }
+
+    function isDownloadModeEnabled() {
+      return modeEl.value === 'download' || modeEl.value === 'both';
+    }
+
+    function isDualModeEnabled() {
+      return modeEl.value === 'both';
+    }
+
+    function getUploadPumpProfile() {
+      return isDualModeEnabled() ? UPLOAD_PUMP_PROFILE_BOTH : UPLOAD_PUMP_PROFILE_SINGLE;
+    }
+
+    function measureBinaryPayloadBytes(data) {
+      if (typeof data === 'string') {
+        return 0;
+      }
+
+      if (data instanceof ArrayBuffer) {
+        return data.byteLength;
+      }
+
+      if (data instanceof Blob) {
+        return data.size;
+      }
+
+      if (ArrayBuffer.isView(data)) {
+        return data.byteLength;
+      }
+
+      return 0;
+    }
+
+    function consumeClientDownloadBps() {
+      const now = Date.now();
+      const elapsedMs = Math.max(now - clientDownloadLastAt, 1);
+      const bps = clientDownloadBytes * (1000 / elapsedMs);
+      clientDownloadBytes = 0;
+      clientDownloadLastAt = now;
+      return bps;
     }
 
     function setGaugeTargetsFromMode() {
+      if (isDualModeEnabled()) {
+        targetGaugeSingleMbps = smoothedDownloadMbps + smoothedUploadMbps;
+        targetGaugeDownloadMbps = smoothedDownloadMbps;
+        targetGaugeUploadMbps = smoothedUploadMbps;
+        return;
+      }
+
       if (modeEl.value === 'download') {
         targetGaugeSingleMbps = smoothedDownloadMbps;
         targetGaugeDownloadMbps = 0;
@@ -649,6 +780,8 @@
       latencyMs = 0;
       downloadSamples = [];
       uploadSamples = [];
+      clientDownloadBytes = 0;
+      clientDownloadLastAt = Date.now();
       downloadEl.textContent = formatMbpsValue(0);
       uploadEl.textContent = formatMbpsValue(0);
       latencyEl.textContent = '-- ms';
@@ -729,23 +862,24 @@
         return;
       }
 
-      const mode = modeEl.value;
-      if (mode !== 'upload') {
+      if (!isUploadModeEnabled()) {
         return;
       }
 
-      if (socket.bufferedAmount >= UPLOAD_BUFFER_HIGH_BYTES) {
+      const profile = getUploadPumpProfile();
+
+      if (socket.bufferedAmount >= profile.highBufferBytes) {
         uploadPumpTimer = setTimeout(() => {
           uploadPumpTimer = null;
           runUploadPump();
-        }, PUMP_DELAY_BACKPRESSURE_MS);
+        }, profile.backpressureDelayMs);
         return;
       }
 
       let packetsSent = 0;
       while (
-        socket.bufferedAmount < UPLOAD_BUFFER_LOW_BYTES &&
-        packetsSent < MAX_PACKETS_PER_PUMP &&
+        socket.bufferedAmount < profile.lowBufferBytes &&
+        packetsSent < profile.maxPacketsPerPump &&
         isRunning &&
         socket.readyState === WebSocket.OPEN
       ) {
@@ -756,12 +890,14 @@
       uploadPumpTimer = setTimeout(() => {
         uploadPumpTimer = null;
         runUploadPump();
-      }, PUMP_DELAY_ACTIVE_MS);
+      }, profile.activeDelayMs);
     }
 
     function startUploadLoop() {
       stopUploadLoop();
-      scheduleUploadPump();
+      if (isUploadModeEnabled()) {
+        scheduleUploadPump();
+      }
     }
 
     function applyMetrics(downloadBps, uploadBps, globalStats) {
@@ -794,7 +930,7 @@
     function connect() {
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
       socket = new WebSocket(`${protocol}//${location.host}/speed`);
-      socket.binaryType = 'arraybuffer';
+      socket.binaryType = 'blob';
 
       socket.onopen = () => {
         setStatus('Connected - idle');
@@ -803,6 +939,9 @@
 
       socket.onmessage = (event) => {
         if (typeof event.data !== 'string') {
+          if (isRunning && isDownloadModeEnabled()) {
+            clientDownloadBytes += measureBinaryPayloadBytes(event.data);
+          }
           return;
         }
 
@@ -814,7 +953,8 @@
         }
 
         if (payload.type === 'metrics') {
-          applyMetrics(payload.downloadBps || 0, payload.uploadBps || 0, payload.globalStats);
+          const measuredClientDownloadBps = isDownloadModeEnabled() ? consumeClientDownloadBps() : 0;
+          applyMetrics(measuredClientDownloadBps, payload.uploadBps || 0, payload.globalStats);
         }
 
         if (payload.type === 'pong') {
@@ -843,6 +983,8 @@
 
     function startTest() {
       isRunning = true;
+      clientDownloadBytes = 0;
+      clientDownloadLastAt = Date.now();
       startButton.disabled = true;
       stopButton.disabled = false;
       updateGaugeModeLabel();
@@ -899,7 +1041,13 @@
       startUploadLoop();
     });
 
+    gaugeRangeEl.addEventListener('change', () => {
+      const nextMax = Number(gaugeRangeEl.value);
+      setGaugeMax(nextMax);
+    });
+
     updateGaugeModeLabel();
+    setGaugeMax(gaugeMaxMbps);
     resetDisplays();
     loadNetworkInfo();
     connect();
